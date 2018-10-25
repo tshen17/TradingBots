@@ -1,6 +1,6 @@
 In order to start the server, run:
 
-./server -case opt_case0
+./mangocore-osc-amd64.x -case BarclaysOptions/sample_0.json
 
 Password for both will be trader0 for testing
 
