@@ -5,6 +5,8 @@ from scipy.stats import norm
 import datetime
 import time
 import random
+from py_vollib import black_scholes
+
 
 t = TradersBot('127.0.0.1', 'trader0', 'trader0')
 
@@ -79,7 +81,7 @@ def calc_vol(P, S, K, T, r):
     #initial guess
     sig = 0.5
 
-    max_iter = 1000
+    max_iter = 10
     thresh = 1e-4
     eps = 1
 
@@ -106,13 +108,15 @@ def ack_register_method(msg, order):
     for security in security_dict.keys():
         if not(security_dict[security]['tradeable']):
             continue
+        type = security[-1].lower()
+        price = security_dict[security]['starting_price']
         MARKET[security] = {}
-        MARKET[security]['type'] = security[-1]
-        MARKET[security]['price'] = security_dict[security]['starting_price']
+        MARKET[security]['type'] = type
+        MARKET[security]['price'] = price
         if security != "TMXFUT":
-            MARKET[security]['strike_price'] = int(security[1:-1])
-            MARKET[security]['vol'] = calc_vol(MARKET[security]['price'], 100, MARKET[security]['strike_price'], 7, INTEREST_RATE)
-    print(MARKET)
+            strike = int(security[1:-1])
+            MARKET[security]['strike'] = strike
+            MARKET[security]['vol'] = black_scholes.implied_volatility.implied_volatility(price, 100, strike, 1/12, INTEREST_RATE, type)
 
 
 # Updates latest price periodically
@@ -124,12 +128,14 @@ def market_update_method(msg, order):
 # Updates market state after each trade
 def trade_method(msg, order):
     global MARKET
-    print(MARKET['T85C']['price'])
+    print(msg, '\n')
     trade_dict = msg['trades']
     for trade in trade_dict:
         security = MARKET[trade["ticker"]]
         security['price'] = trade["price"]
         # security['vol'] = calc_vol(security['type'] == 'C', trade['price'], 100, security['strike'], exp_time(), INTEREST_RATE)
+        security['vol'] = black_scholes.implied_volatility.implied_volatility(security['price'], 100, security['strike'], exp_time(), INTEREST_RATE, security['type'])
+
 
 # Buys or sells in a random quantity every time it gets an update
 # You do not need to buy/sell here
