@@ -1,11 +1,15 @@
+from __future__ import division
 from tradersbot import TradersBot
 
 import math
+from statistics import mean
 from scipy.stats import norm
 import datetime
 import time
 import random
-from py_vollib import black_scholes
+import pandas as pd
+from py_vollib.black.implied_volatility import implied_volatility as iv
+from py_vollib.black.greeks.analytical import delta, gamma, vega
 
 
 t = TradersBot('127.0.0.1', 'trader0', 'trader0')
@@ -14,7 +18,7 @@ START_TIME = time.time()
 
 def exp_time():
     global START_TIME
-    return (time.time() - START_TIME) / (7.5 * 60 * 12)
+    return (7.5 * 60 - (time.time() - START_TIME)) / (7.5 * 60)
 
 DELTA_MAX = 1000
 VEGA_MAX = 9000
@@ -23,6 +27,7 @@ INTEREST_RATE = 0
 TRADE_FEE = 0.005
 OPTIONS_LIM = 5000
 FUTURES_LIM = 2500
+WINDOW = 10
 
 # 1. Exploit inconsistencies in implied volatility across different strike prices
 # 2. Market make when spreads are large, without becoming overly exposed to risk
@@ -35,6 +40,13 @@ FUTURES_LIM = 2500
 # Greeks of our portfolio
 
 PORTFOLIO = {}
+PORTFOLIO['positions'] = {}
+PORTFOLIO['money'] = 1000000
+PORTFOLIO['trades'] = 0
+PORTFOLIO['greeks'] = {}
+PORTFOLIO['greeks']['delta'] = 0
+PORTFOLIO['greeks']['gamma'] = 0
+PORTFOLIO['greeks']['vega'] = 0
 
 # Our copy of the market. Keeps track of:
 # List of all available securities
@@ -112,44 +124,109 @@ def ack_register_method(msg, order):
         price = security_dict[security]['starting_price']
         MARKET[security] = {}
         MARKET[security]['type'] = type
-        MARKET[security]['price'] = price
+        MARKET[security]['cur_price'] = price
+        MARKET[security]['prices'] = []
+        #MARKET[security]['price'] = [price]
         if security != "TMXFUT":
             strike = int(security[1:-1])
             MARKET[security]['strike'] = strike
-            MARKET[security]['vol'] = black_scholes.implied_volatility.implied_volatility(price, 100, strike, 1/12, INTEREST_RATE, type)
+            MARKET[security]['cur_iv'] = iv(price, 100, strike, INTEREST_RATE, 1/12, type)
+            MARKET[security]['ivs'] = []
+    print(MARKET)
 
 
 # Updates latest price periodically
 def market_update_method(msg, order):
     global MARKET
-    # print(MARKET)
-    # MARKET[msg['market_state']['ticker']]['price'] = msg['market_state']['last_price']
+    security = msg['market_state']['ticker']
+    MARKET[security]['cur_price'] = msg['market_state']['last_price']
+    MARKET[security]['prices'].append(MARKET[security]['cur_price'])
+    if security != "TMXFUT":
+        try:
+            MARKET[security]['cur_iv'] = iv(MARKET[security]['cur_price'], 100, MARKET[security]['strike'], INTEREST_RATE, exp_time(), MARKET[security]['type'])
+            MARKET[security]['ivs'].append(MARKET[security]['cur_iv'])
+        except:
+            MARKET[security]['cur_iv'] = 0
+            MARKET[security]['ivs'].append(MARKET[security]['cur_iv'])
+            print(security)
+
+        # if security != "TMXFUT":
+        #     MARKET[security]['ivs'].append(MARKET[security]['cur_iv'])
+        # print(MARKET[security]['prices'])
+        # print(MARKET[security]['ivs'])
+
 
 # Updates market state after each trade
 def trade_method(msg, order):
     global MARKET
-    print(msg, '\n')
+    print('TRADE')
     trade_dict = msg['trades']
     for trade in trade_dict:
-        security = MARKET[trade["ticker"]]
-        security['price'] = trade["price"]
+        security = trade["ticker"]
+        MARKET[security]['cur_price'] = trade["price"]
+        MARKET[security]['prices'].append(MARKET[security]['cur_price'])
+        #security['price'].append(trade["price"])
         # security['vol'] = calc_vol(security['type'] == 'C', trade['price'], 100, security['strike'], exp_time(), INTEREST_RATE)
-        security['vol'] = black_scholes.implied_volatility.implied_volatility(security['price'], 100, security['strike'], exp_time(), INTEREST_RATE, security['type'])
+        if security != "TMXFUT":
+            try:
+                MARKET[security]['cur_iv'] = iv(MARKET[security]['cur_price'], 100, MARKET[security]['strike'], INTEREST_RATE, exp_time(), MARKET[security]['type'])
+                MARKET[security]['ivs'].append(MARKET[security]['cur_iv'])
+            except:
+                MARKET[security]['cur_iv'] = 0
+                MARKET[security]['ivs'].append(MARKET[security]['cur_iv'])
+                print(security)
+    #print(MARKET['T89C'])
 
-
-# Buys or sells in a random quantity every time it gets an update
-# You do not need to buy/sell here
+# Buy and sell here
 def trader_update_method(msg, order):
     global MARKET
-    positions = msg['trader_state']['positions']
-    for security in positions.keys():
-        if random.random() < 0.5:
-            quant = 10*random.randint(1, 10)
-            order.addBuy(security, quantity=quant,price=MARKET[security]['price'])
-        else:
-            quant = 10*random.randint(1, 10)
-            order.addSell(security, quantity=quant,price=MARKET[security]['price'])
+    print('TRADER UPDATE\n')
 
+    positions = msg['trader_state']['positions']
+
+    for security in positions.keys():
+
+        if len(MARKET[security]['prices']) > WINDOW:
+            s = pd.DataFrame(MARKET[security]['prices'])
+            MARKET[security]['MA'] = s.rolling(window=WINDOW, min_periods=1).mean()
+            MARKET[security]['STD'] = s.rolling(window=WINDOW, min_periods=1).std()
+            MARKET[security]['Upper'] = MARKET[security]['MA'] + (MARKET[security]['STD'] * 1.25)
+            MARKET[security]['Lower'] = MARKET[security]['MA'] - (MARKET[security]['STD'] * 1.25)
+            MARKET[security]['MA'] = MARKET[security]['MA'].values.flatten().tolist()
+            MARKET[security]['STD'] = MARKET[security]['STD'].values.flatten().tolist()
+            MARKET[security]['Upper'] = MARKET[security]['Upper'].values.flatten().tolist()
+            MARKET[security]['Lower'] = MARKET[security]['Lower'].values.flatten().tolist()
+
+            # Bollinger Bands Strategy
+            if MARKET[security]['prices'][-1] < MARKET[security]['Lower'][-1] and MARKET[security]['prices'][-2] < MARKET[security]['Lower'][-2]:
+                print("BUY (BB) ", security, ": 10 @", MARKET[security]['cur_price'])
+                order.addBuy(security, quantity=10, price=MARKET[security]['cur_price'])
+                if security not in PORTFOLIO:
+                    PORTFOLIO[security] = {}
+                    PORTFOLIO[security]['price'] = MARKET[security]['cur_price']
+                    PORTFOLIO[security]['quant'] = 10
+                    PORTFOLIO[security]['delta'] = 10*delta(MARKET[security]['type'], 100, MARKET[security]['strike'], exp_time(), INTEREST_RATE, MARKET[security]['cur_iv'])
+                    PORTFOLIO[security]['gamma'] = 10*gamma(MARKET[security]['type'], 100, MARKET[security]['strike'], exp_time(), INTEREST_RATE, MARKET[security]['cur_iv'])
+                    PORTFOLIO[security]['vega'] = 10*vega(MARKET[security]['type'], 100, MARKET[security]['strike'], exp_time(), INTEREST_RATE, MARKET[security]['cur_iv'])
+            elif MARKET[security]['prices'][-1] > MARKET[security]['Upper'][-1] and MARKET[security]['prices'][-2] < MARKET[security]['Upper'][-2]:
+                print("SELL (BB) ", security, ": 10 @", MARKET[security]['cur_price'])
+                order.addSell(security, quantity=10, price=MARKET[security]['cur_price'])
+
+        # Basic trading strategies to test program (some bugs to fix)
+
+        # if security != "TMXFUT" and MARKET[security]['cur_iv'] < 0.8 * mean(MARKET[security]['ivs']):
+        #     print("BUY (IV) ", security, ": 10 @", MARKET[security]['cur_price'])
+        #     order.addBuy(security, quantity=10, price=MARKET[security]['cur_price'])
+        # elif security != "TMXFUT" and MARKET[security]['cur_iv'] > 1.25 * mean(MARKET[security]['ivs']):
+        #     print("SELL (IV) ", security, ": 10 @", MARKET[security]['cur_price'])
+        #     order.addSell(security, quantity=10, price=MARKET[security]['cur_price'])
+        #
+        # if MARKET[security]['cur_price'] < 0.8 * mean(MARKET[security]['prices']):
+        #     print("BUY (AVG) ", security, ": 10 @", MARKET[security]['cur_price'])
+        #     order.addBuy(security, quantity=10, price=MARKET[security]['cur_price'])
+        # elif MARKET[security]['cur_price'] > 1.25 * mean(MARKET[security]['prices']):
+        #     print("SELL (AVG) ", security, ": 10 @", MARKET[security]['cur_price'])
+        #     order.addSell(security, quantity=10, price=MARKET[security]['cur_price'])
 
 t.onAckRegister = ack_register_method
 t.onMarketUpdate = market_update_method
