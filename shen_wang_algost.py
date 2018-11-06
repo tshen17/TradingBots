@@ -155,7 +155,7 @@ def update_news(msg, order):
         raise ValueError("News message contains neither buying nor selling statement. It says: ", headline)
     #print(order)
 
-t = TradersBot('127.0.0.1', 'trader0', 'trader0')
+t = TradersBot(host=sys.argv[1], id=sys.argv[2], password=sys.argv[3])
 
 t.onAckRegister = register
 t.onMarketUpdate = update_market
